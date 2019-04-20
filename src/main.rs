@@ -1,4 +1,6 @@
 extern crate vulkano;
+extern crate image;
+
 use vulkano::instance::Instance;
 use vulkano::instance::InstanceExtensions;
 use vulkano::instance::PhysicalDevice;
@@ -12,6 +14,12 @@ use vulkano::command_buffer::CommandBuffer;
 use vulkano::sync::GpuFuture;
 use vulkano::pipeline::ComputePipeline;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
+
+use vulkano::format::Format;
+use vulkano::image::Dimensions;
+use vulkano::image::StorageImage;
+use vulkano::format::ClearValue;
+use image::{ImageBuffer, Rgba};
 
 use std::sync::Arc;
 
@@ -90,6 +98,71 @@ fn main() {
 	for (n, val) in content.iter().enumerate() {
 		assert_eq!(*val, n as u32 * 12);
 	}
+
+	// #Image
+
+
+	let image = StorageImage::new(device.clone(), Dimensions::Dim2d { width: 1024, height: 1024 },
+	Format::R8G8B8A8Unorm, Some(queue.family())).unwrap();
+
+	let buf = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(),
+	(0 .. 1024 * 1024 * 4).map(|_| 0u8))
+	.expect("failed to create buffer");
+
+	let command_buffer = AutoCommandBufferBuilder::new(device.clone(), queue.family()).unwrap()
+	.clear_color_image(image.clone(), ClearValue::Float([0.0, 0.0, 1.0, 1.0])).unwrap()
+	.copy_image_to_buffer(image.clone(), buf.clone()).unwrap()
+	.build().unwrap();
+
+	let finished = command_buffer.execute(queue.clone()).unwrap();
+	finished.then_signal_fence_and_flush().unwrap()
+	.wait(None).unwrap();
+
+
+	let buffer_content = buf.read().unwrap();
+	let image = ImageBuffer::<Rgba<u8>, _>::from_raw(1024, 1024, &buffer_content[..]).unwrap();
+	image.save("image.png").unwrap();
+
+	// #Mandelbrot
+
+
+	mod mandelbrot_shader {
+		vulkano_shaders::shader!{
+			ty: "compute",
+			path: "shaders/mandelbrot.glsl"
+		}
+	}
+
+	let shader = mandelbrot_shader::Shader::load(device.clone())
+	.expect("failed to create shader module");
+
+	let compute_pipeline = Arc::new(ComputePipeline::new(device.clone(), &shader.main_entry_point(), &())
+	.expect("failed to create compute pipeline"));
+
+	let image = StorageImage::new(device.clone(), Dimensions::Dim2d { width: 1024, height: 1024 },
+	Format::R8G8B8A8Unorm, Some(queue.family())).unwrap();
+
+	let set = Arc::new(PersistentDescriptorSet::start(compute_pipeline.clone(), 0)
+	.add_image(image.clone()).unwrap()
+	.build().unwrap()
+	);
+
+	let buf = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(),
+	(0 .. 1024 * 1024 * 4).map(|_| 0u8))
+	.expect("failed to create buffer");
+
+	let command_buffer = AutoCommandBufferBuilder::new(device.clone(), queue.family()).unwrap()
+	.dispatch([1024 / 8, 1024 / 8, 1], compute_pipeline.clone(), set.clone(), ()).unwrap()
+	.copy_image_to_buffer(image.clone(), buf.clone()).unwrap()
+	.build().unwrap();
+
+	let finished = command_buffer.execute(queue.clone()).unwrap();
+	finished.then_signal_fence_and_flush().unwrap()
+		.wait(None).unwrap();
+
+	let buffer_content = buf.read().unwrap();
+	let image = ImageBuffer::<Rgba<u8>, _>::from_raw(1024, 1024, &buffer_content[..]).unwrap();
+	image.save("image.png").unwrap();
 
 	println!("Everything succeeded!")
 }
